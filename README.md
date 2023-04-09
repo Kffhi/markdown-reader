@@ -1,2 +1,2 @@
 # markdown-reader
-一个简单的markdown文件解析服务
+一个简单的markdown文件解析服务，可以读取服务器指定目录下的md文件并返回相关数据用于前端展示

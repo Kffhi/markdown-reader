@@ -6,7 +6,7 @@ const path = require('path')
 router.get('/get', function(req, res) {
     const data = fs.readFileSync(path.resolve(__dirname, '../database/mock.json'), 'utf-8')
     res.json({
-        msg: `增加nodemon测试`,
+        msg: `mock接口——mock/get`,
         data: JSON.parse(data)
     })
 })

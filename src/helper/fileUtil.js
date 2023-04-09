@@ -1,194 +1,152 @@
 // 引入其他模块
 const fs = require('fs')
 const path = require('path')
-// const constant = require('../config/constant')
-const responseCode = require('../config/responseCode')
+const marked = require('marked')
+const cheerio = require('cheerio')
+const { v4: uuidv4 } = require('uuid')
+const constant = require('../config/constant')
 
 /**
- * 获取读文件流
- * @param filePath 文件路径
- * @param options 可选设置
- * @returns {ReadStream} 读文件流
+ * 获取指定目录下的所有markdown文件，并以树形结构返回
+ * @param basePath
+ * @param filePath
  */
-function getReadStream(filePath, ...options) {
-    const { flag } = options.length > 0 ? options[0] : {}
-    return fs.createReadStream(filePath, {
-        flags: flag || 'r'
-    })
-}
-
-/**
- * 读取文件内容为字符串
- * @param filePath 文件路径
- * @param options 可选设置
- * @returns {Promise<unknown>} Promise
- */
-function readAsString(filePath, ...options) {
+function getMarkdownFiles(basePath, filePath) {
     return new Promise((resolve, reject) => {
-        const { encoding } = options
-        const readStream = getReadStream(filePath, options)
-        readStream.setEncoding(encoding || 'utf-8')
-        let data = ''
-        readStream.on('data', chunk => {
-            data += chunk
-        })
-        readStream.on('end', () => {
-            console.log(`${path.basename(filePath)} => read success`)
-            if (data.length === 0) {
-                // TODO: 不应该这么写的，不过这repo就这么几个文件，逻辑定死
-                resolve('{}')
-            } else {
-                resolve(data)
-            }
-        })
-        readStream.on('error', err => {
-            console.log('读取文件错误', err)
-            reject(responseCode.FILE_READ_ERROR)
-        })
-    })
-}
-
-/**
- * 读取JSON文件
- * @param filePath 文件路径
- * @param options 可选设置
- * @returns {Promise<any>} Promise
- */
-function readJSONFile(filePath, ...options) {
-    return new Promise((resolve, reject) => {
-        readAsString(filePath, options).then(data => {
-            resolve(JSON.parse(data))
-        }).catch(err => {
-            reject(err)
-        })
-    })
-}
-
-/**
- * 获取文件夹下所有的文件
- * @param filePath 文件路径
- * @returns fileNames[] 文件名数组
- */
-function getAllFile(dirPath) {
-    return fs.readdirSync(dirPath)
-}
-
-
-/**
- * 获取写文件流
- * @param filePath 文件路径
- * @param options 可选设置
- * @returns {WriteStream} 写文件流
- */
-function getWriteStream(filePath, ...options) {
-    let { flag } = options.length > 0 ? options[0] : {}
-    return fs.createWriteStream(filePath, {
-        flags: flag || 'w'
-    })
-}
-
-/**
- * 写文件
- * @param filePath 文件路径
- * @param data 数据
- * @param options 可选设置
- * @returns {Promise<unknown>} Promise
- */
-function write(filePath, data, ...options) {
-    return new Promise((resolve, reject) => {
-        const writeStream = getWriteStream(filePath, options)
-        writeStream.write(data)
-        writeStream.end()
-        writeStream.on('finish', () => {
-            console.log(`${path.basename(filePath)} => write success`)
-            resolve()
-        })
-        writeStream.on('error', err => {
-            console.log('写文件错误', err)
-            reject(responseCode.FILE_WRITE_ERROR)
-        })
-    })
-}
-
-/**
- * 写JSON数据
- * @param filePath 文件路径
- * @param data 数据
- * @param options 可选设置
- * @returns {Promise<unknown>} Promise
- */
-function writeJSONFile(filePath, data, ...options) {
-    return new Promise((resolve, reject) => {
-        data = JSON.stringify(data)
-        write(filePath, data, options).then(data => {
-            resolve(data)
-        }).catch(err => {
-            reject(err)
-        })
-    })
-}
-
-/**
- * 检测文件是否存在，不存在则创建
- * @param filePath 文件路径
- * @returns {Promise<void>}
- */
-function checkAndMkFile(filePath) {
-    return new Promise((resolve, reject) => {
-        fs.open(filePath, 'wx', (err, fd) => {
+        const result = []
+        fs.readdir(filePath, { withFileTypes: true }, (err, files) => {
             if (err) {
-                if (err.code === 'EEXIST') {
-                    // 文件已存在
-                    resolve()
-                } else {
-                    // 其他文件打开错误
-                    reject(responseCode.FILE_OPEN_ERROR)
+                reject(err)
+                return
+            }
+            let remainingFiles = files.length
+            if (!remainingFiles) {
+                resolve(result)
+                return
+            }
+            files.forEach((file) => {
+                if (file.name.startsWith('.') || file.name === 'README.md') {
+                    remainingFiles--
+                    return
                 }
+                const fullPath = path.join(filePath, file.name)
+                const relativePath = fullPath.replace(basePath, '')
+                if (file.isFile() && path.extname(file.name) === '.md') {
+                    // Add markdown file to result array
+                    result.push({
+                        path: relativePath,
+                        name: file.name,
+                        children: [],
+                        content: null
+                    })
+                    remainingFiles--
+                    if (!remainingFiles) {
+                        resolve(result)
+                    }
+                } else if (file.isDirectory()) {
+                    getMarkdownFiles(basePath, fullPath)
+                        .then((children) => {
+                            result.push({
+                                path: relativePath,
+                                name: file.name,
+                                children,
+                                content: null
+                            })
+                            remainingFiles--
+                            if (!remainingFiles) {
+                                resolve(result)
+                            }
+                        })
+                        .catch((err) => {
+                            reject(err)
+                            return
+                        })
+                } else {
+                    remainingFiles--
+                    if (!remainingFiles) {
+                        resolve(result)
+                    }
+                }
+            })
+        })
+    })
+}
+
+/**
+ * 根据数据解析出标题组成的大纲
+ * @param data
+ * @returns {*[]}
+ */
+function getOutline(data) {
+    let result = []
+    let stack = []
+    let prevLevel = 0
+
+    for (let i = 0; i < data.length; i++) {
+        let item = data[i]
+
+        while (stack.length && item.level <= stack[stack.length - 1].level) {
+            stack.pop()
+        }
+
+        if (stack.length) {
+            stack[stack.length - 1].children = stack[stack.length - 1].children || []
+            stack[stack.length - 1].children.push(item)
+        } else {
+            result.push(item)
+        }
+
+        stack.push(item)
+        prevLevel = item.level
+    }
+
+    return result
+}
+
+/**
+ * 根据path获取markdown的具体内容
+ * @param filePath
+ * @returns {Promise<unknown>}
+ */
+function getMarkdownFileByPath(filePath) {
+    return new Promise((resolve, reject) => {
+        fs.readFile(filePath, 'utf-8', (err, data) => {
+            if (err) {
+                reject(err)
             } else {
-                // 写完后记得关闭，否则对文件的其他操作可能会出现错误
-                fs.close(fd, (err) => {
-                    if (err) {
-                        reject(responseCode.FILE_CLOSE_ERROR)
-                    } else {
-                        // 使用wx的方式打开，如果文件不存在会自动创建
-                        resolve()
+                // 解析md
+                const name = path.basename(filePath)
+                const content = marked.parse(data)
+                const $ = cheerio.load(content)
+
+                // 处理标题
+                const root = { level: 0, text: '', children: [] }
+                $('h1, h2, h3, h4, h5, h6').each(function () {
+                    const level = parseInt(this.name.slice(1))
+                    const text = $(this).text().trim()
+                    // 给一个id是为了后面做大纲的点击滚动定位
+                    const id = uuidv4()
+                    $(this).attr('id', id)
+                    root.children.push({ level, text, id })
+                })
+                const outline = getOutline(root.children)
+
+                // 处理图片路径
+                $('img').each(function () {
+                    const src = $(this).attr('src')
+                    if (src && !src.startsWith('http') && !src.startsWith('data')) {
+                        $(this).attr('src', `${constant.BASE_URL}/${src}`)
                     }
                 })
-            }
-        })
-    })
-}
 
-/**
- * 文件复制
- * @param srcPath 源文件路径
- * @param destPath 目标文件路径
- */
-async function copy(srcPath, destPath) {
-    return new Promise((resolve, reject) => {
-        const readStream = getReadStream(srcPath)
-        const writeStream = getWriteStream(destPath)
-        readStream.pipe(writeStream)
-        readStream.on('error', err => {
-            reject(false)
-        })
-        writeStream.on('finish', () => {
-            resolve(true)
-        })
-        writeStream.on('error', (err) => {
-            reject(false)
+                // 返回
+                resolve({ name, content: $('body').html(), outline })
+            }
         })
     })
 }
 
 module.exports = {
-    copy,
-    checkAndMkFile,
-    getAllFile,
-    getReadStream,
-    readAsString,
-    readJSONFile,
-    getWriteStream,
-    write,
-    writeJSONFile
+    getMarkdownFileByPath,
+    getMarkdownFiles
 }
